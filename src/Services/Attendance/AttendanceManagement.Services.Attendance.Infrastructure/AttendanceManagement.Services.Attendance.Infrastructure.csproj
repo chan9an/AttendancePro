@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <RootNamespace>AttendanceManagement.Services.Attendance.Infrastructure</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="..\AttendanceManagement.Services.Attendance.Domain\AttendanceManagement.Services.Attendance.Domain.csproj" />
+    <ProjectReference Include="..\AttendanceManagement.Services.Attendance.Application\AttendanceManagement.Services.Attendance.Application.csproj" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Entity Framework Core 8 and SQL Server -->
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="8.0.4" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.SqlServer" Version="8.0.4" />
+    <PackageReference Include="Microsoft.EntityFrameworkCore.Relational" Version="8.0.4" />
+    <!-- HTTP Client Factory for resilient inter-service calls -->
+    <PackageReference Include="Microsoft.Extensions.Http" Version="8.0.0" />
+    <PackageReference Include="Microsoft.Extensions.Options.ConfigurationExtensions" Version="8.0.0" />
+  </ItemGroup>
+
+</Project>
