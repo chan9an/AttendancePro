@@ -5,50 +5,50 @@ The Attendance & Leave Management System is designed as a simplified microservic
 
 ## 2. Microservice Boundaries & Responsibilities
 
-### 2.1 Identity & Employee Service (`Port 5001`)
+### 2.1 Identity & Employee Service (`IdentityService`, Port 5001)
 - **Domain Bounded Context**: Identity, Security Credentials, and Employee Directory.
 - **Responsibilities**:
   - Employee user authentication via ASP.NET Core Identity.
   - JWT token generation (with claims for `EmployeeId`, `Grade`, `Department`, and `Role`).
-  - Refresh token persistence and secure rotation.
+  - Refresh token persistence and secure rotation (SHA-256 hashed storage).
   - Role-based authorization (`Administrator`, `Manager`, `Employee`).
   - Employee lifecycle management: profiles, grades, reporting hierarchy.
 
-### 2.2 Attendance & Leave Service (`Port 5002`)
+### 2.2 Attendance & Leave Service (`AttendanceService`, Port 5002)
 - **Domain Bounded Context**: Time Tracking, Shift Attendance, Leave Workflows, and Monthly Leave Accrual.
 - **Responsibilities**:
   - Daily attendance logging with project association.
-  - **Attendance Auto-Approval Engine**:
-    - Auto-approves when employee is verified on the project and has no approved leave.
-    - Flags as `PendingApproval` if not assigned to the project.
+  - **Attendance Assignment Validation & Auto-Approval**:
+    - Validates active project assignment spanning attendance date; rejects unassigned submissions.
+    - Auto-approves attendance upon validated project assignment.
     - Prevents attendance creation on approved leave dates.
-  - **Double-Entry Style Leave Ledger**:
+    - Filtered unique index prevents duplicate active attendance per calendar date while permitting re-logging if cancelled.
+  - **Append-Only Transaction Ledger**:
     - Immutable ledger entries (`MonthlyCredit`, `LeaveDeduction`, `CancellationRefund`, `ManagerAdjustment`).
-    - Auditability and transactional consistency for balance queries.
-  - Grade-based monthly entitlement accrual with idempotency safeguards.
+    - Auditability, transactional consistency, and negative-balance prevention via database locking (`sp_getapplock`).
+  - Grade-based monthly entitlement accrual with idempotency safeguards and annual cap enforcement.
 
-### 2.3 API Gateway (`Port 5000`)
+### 2.3 API Gateway (`ApiGateway`, Port 5000)
 - **Technology**: Ocelot API Gateway.
 - **Responsibilities**:
   - Acts as the single point of entry for clients.
-  - Routes upstream routes (`/gateway/identity/*`, `/gateway/attendance/*`) to downstream service endpoints (`/api/v1/*`).
+  - Routes upstream routes (`/gateway/identity/*`, `/gateway/attendance/*`, `/gateway/leave/*`, `/gateway/projects/*`) to downstream service endpoints (`/api/v1/*`).
   - Correlation ID injection (`X-Correlation-ID`) across requests.
-  - Pass-through Bearer token routing to backend services.
+  - Ingress JWT token validation and pass-through Bearer token routing to backend services.
+  - Aggregated Swagger UI hosted at `/swagger`.
 
-## 3. Layered Architecture within Services
+## 3. Natural & Understandable Service Structure
 
-Each service implements a strict 4-layer Clean Architecture:
+Each service follows a clear, natural layout familiar to .NET developers:
 ```
-[ API Layer ] -> ASP.NET Core Web API Controllers, Middleware, Swagger, Program.cs
-      |
-      v
-[ Infrastructure Layer ] -> EF Core DbContext, Fluent API Configurations, HTTP Clients
-      |
-      v
-[ Application Layer ] -> Contracts, DTOs, FluentValidation, Business Workflows, Mappings
-      |
-      v
-[ Domain Layer ] -> Pure C# Entities, Value Objects, Domain Enums, Domain Exceptions
+[ Controllers ]  -> ASP.NET Core Web API Controllers
+[ Services ]     -> Business rule execution, orchestration, transaction management
+[ Repositories ] -> Explicit repositories encapsulating EF Core data-access operations
+[ Models ]       -> Clean C# model entities and domain enums
+[ DTOs ]         -> Request and response contracts
+[ Data ]         -> EF Core DbContext and Fluent API entity configurations
+[ Validators ]   -> FluentValidation request validators
+[ Middleware ]   -> Global exception handling (RFC 7807) and correlation tracking
 ```
 
 ## 4. Communication Architecture

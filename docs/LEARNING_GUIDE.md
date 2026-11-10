@@ -94,27 +94,48 @@ ASP.NET Core provides three service lifetimes:
 
 ## 4. Enterprise Microservice Patterns
 
-### 4.1 Double-Entry Financial Style Ledger for Leave Balances
+### 4.1 Append-Only Transaction Ledger for Leave Balances
 - Instead of mutating a single `Balance` column (`Balance = Balance - 2`), the system writes immutable transactions to `LeaveLedgerEntries`:
   - `MonthlyCredit`: $+X$ days.
   - `LeaveDeduction`: $-Y$ days.
   - `CancellationRefund`: $+Y$ days.
   - `ManagerAdjustment`: $\pm Z$ days.
 - **Benefits**:
-  1. Complete historical auditability for HR compliance.
-  2. Eliminates lost-update race conditions during concurrent approvals.
-  3. Real-time balance is calculated safely via `SUM(Days)`.
+  1. Complete historical auditability for HR and financial compliance.
+  2. Eliminates lost-update race conditions associated with mutable balance columns.
+  3. Real-time available balance is calculated dynamically via `SUM(Days)`.
+  4. Cancellations issue a positive refund transaction rather than physically deleting rows, preserving complete ledger history.
 
-### 4.2 Database-Enforced Idempotency
-- Problem: An automated monthly credit cron job or an administrator might trigger the credit run twice for May 2026.
-- Solution: A SQL Server filtered unique index:
+### 4.2 Aggregate-Level Balance Concurrency with `sp_getapplock`
+- **The Problem**: A single row `ConcurrencyStamp` on `LeaveRequest` protects individual requests from simultaneous review, but does NOT protect an employee's aggregate balance. If an employee with 3 available days submits two separate 2-day leave requests, two managers could approve them concurrently:
+  - Manager 1 checks balance ($3 \ge 2$) $\to$ OK.
+  - Manager 2 checks balance ($3 \ge 2$) $\to$ OK.
+  - Both commit deductions $\to$ Balance drops to $-1$ day!
+- **The Solution**: Transaction-scoped SQL Server Application Lock (`sp_getapplock`):
   ```csharp
-  builder.HasIndex(e => new { e.EmployeeId, e.AccountingYear, e.AccountingMonth, e.TransactionType })
-         .IsUnique()
-         .HasFilter("[TransactionType] = 1"); // 1 = MonthlyCredit
+  string lockResource = $"LeaveBalance_{employeeId:N}";
+  await _context.Database.ExecuteSqlRawAsync(
+      "EXEC @result = sp_getapplock @Resource = @resource, @LockMode = 'Exclusive', @LockOwner = 'Transaction', @LockTimeout = @timeout",
+      ...);
   ```
-  The database engine itself guarantees duplicate credits cannot be written.
+  The exclusive lock serializes concurrent approval transactions for the same employee, ensuring the second manager re-reads the updated ledger balance and rejects the over-allocation.
 
-### 4.3 Zero-Trust Security in Microservices
-- The API Gateway acts as the public reverse proxy.
-- However, internal microservices **independently validate JWT signatures and lifetimes**. Microservices never trust internal network traffic blindly.
+### 4.3 Explicit Repositories vs. Generic Repository Antipattern
+- Rather than introducing generic `IRepository<T>` or redundant `IUnitOfWork` abstractions that simply re-wrap EF Core's built-in `DbContext` and `DbSet<T>`, the solution uses explicit, aggregate-focused repositories:
+  - `IAttendanceRepository` & `AttendanceRepository`
+  - `ILeaveRepository` & `LeaveRepository`
+  - `IProjectRepository` & `ProjectRepository`
+  - `IEmployeeRepository` & `EmployeeRepository`
+- **Benefits**:
+  - Repositories encapsulate raw EF Core queries, includes, and SQL Server specifics (`sp_getapplock`).
+  - Domain services retain all business logic, workflow validation, and transaction orchestration.
+  - Clean and understandable for beginner-to-junior .NET developers without excessive architectural boilerplate.
+
+### 4.4 Filtered Unique Indexes for Re-Entry & Idempotency
+- **Attendance Re-logging**: Filtered unique index on `(EmployeeId, Date)` with `[Status] <> 4` prevents duplicate active attendance entries per calendar date while permitting an employee to re-log attendance if their prior submission was cancelled.
+- **Monthly Credit Idempotency**: Filtered unique index on `(EmployeeId, AccountingYear, AccountingMonth, TransactionType)` with `[TransactionType] = 1` guarantees at the database storage engine level that an employee can never receive duplicate monthly accruals.
+- **Deduction & Refund Safety**: Unique filtered indexes on `(LeaveRequestId, TransactionType)` guarantee that a leave request can never experience duplicate ledger deductions or refunds from concurrent actions.
+
+### 4.5 Zero-Trust Security in Microservices
+- The API Gateway (`ApiGateway`, Port 5000) acts as the public ingress reverse proxy and validates JWT tokens with `GatewayBearer`.
+- However, internal microservices (`IdentityService` on 5001, `AttendanceService` on 5002) **independently validate JWT signatures, issuer, audience, and role policies**. Microservices never trust internal network traffic blindly.

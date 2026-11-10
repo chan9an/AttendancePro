@@ -22,7 +22,7 @@ This document prepares you for Senior .NET Developer and Solution Architect tech
 > In our design, `AttendanceRecord` and `LeaveRequest` store `EmployeeId (Guid)` as a logical identifier rather than a relational constraint.
 > Integrity is enforced at the **Application Layer**:
 > 1. When an employee logs attendance or applies for leave, the service queries our resilient `IdentityIntegrationService` (a typed `HttpClient` managed via `IHttpClientFactory`) to verify the employee exists and is active.
-> 2. For project allocations, we implemented a local reference projection `ProjectAssignmentReference` within the Attendance bounded context, avoiding synchronous chatty calls to external project services.
+> 2. For project allocations, we implemented the `ProjectAssignment` model (mapped to table `ProjectAssignmentReferences`), verifying that an active assignment spans the attendance date.
 > 3. Deletion of employees is modeled as an administrative status change (`EmploymentStatus.Inactive`) rather than physical hard deletes, preserving historic attendance records intact."
 
 ### Q3: What is the role of Ocelot, and why must backend services still validate JWT tokens if the Gateway is present?
@@ -39,13 +39,13 @@ This document prepares you for Senior .NET Developer and Solution Architect tech
 ### Q4: Why did you use Fluent API (`IEntityTypeConfiguration<T>`) instead of Data Annotations?
 **Senior Architect Answer:**
 > "There are three primary reasons:
-> 1. **Clean Architecture Adherence**: Data Annotations (like `[Table]`, `[MaxLength]`, `[ForeignKey]`) pollute pure Domain entities with database and ORM dependencies. Domain entities should remain plain C# objects.
+> 1. **Clean Model Architecture**: Data Annotations (like `[Table]`, `[MaxLength]`, `[ForeignKey]`) pollute pure model entities with database and ORM dependencies. Domain entities should remain plain C# objects.
 > 2. **Schema Expressiveness**: Data Annotations cannot express advanced SQL Server features such as composite unique indexes (`IX_AttendanceRecords_EmployeeId_Date`), filtered unique indexes for idempotency (`UX_LeaveLedgerEntries_MonthlyCredit_Idempotency`), decimal precision (`HasPrecision(5, 2)`), or specific delete behaviors (`DeleteBehavior.Restrict`).
 > 3. **Maintainability**: Instead of scattering configurations across entity properties or creating a 1,000-line monolithic `OnModelCreating` method, we encapsulate each entity's schema in its own configuration class and register them cleanly via `ApplyConfigurationsFromAssembly`."
 
 ### Q5: How did you design the leave balance system, and why is an append-only ledger superior to a mutable balance column?
 **Senior Architect Answer:**
-> "We implemented a **Double-Entry Financial Style Ledger Pattern** using `LeaveLedgerEntries`.
+> "We implemented an **Append-Only Transaction Ledger Pattern** using `LeaveLedgerEntries`.
 > In traditional simple apps, a single `LeaveBalance` column is updated (`Balance = Balance - days`). In enterprise environments, this fails because:
 > - It suffers from lost-update concurrency anomalies during simultaneous approvals.
 > - It leaves no audit trail for HR compliance, payroll verification, or annual financial audits.
@@ -105,3 +105,37 @@ This document prepares you for Senior .NET Developer and Solution Architect tech
 > - Missing resources $\to$ `404 Not Found`.
 > - Unhandled bugs $\to$ `500 Internal Server Error` with a generic message and the `X-Correlation-ID`.
 > Internal stack traces, SQL syntax errors, and database connection strings are never sent to the client; they are logged securely to Serilog tagged with the correlation ID for internal diagnostics."
+
+### Q11: How do you prevent employee-level negative leave balances when multiple managers concurrently review requests for the same employee?
+**Senior Architect Answer:**
+> "While row-level optimistic concurrency (`ConcurrencyStamp`) prevents race conditions on an individual `LeaveRequest`, it cannot protect an employee's aggregate balance across two distinct requests.
+> If an employee has 3 available days and submits two independent 2-day requests, two managers reviewing them simultaneously could both see 3 available days, approve them, and leave the balance at $-1$ days.
+> To prevent this, during leave approval we acquire an exclusive, transaction-scoped SQL Server Application Lock via `sp_getapplock` using resource key `LeaveBalance_{employeeId:N}` with `LockOwner = Transaction`.
+> The lock and balance validation execute within the same database transaction. Any concurrent approval is serialized until the first transaction commits its status and deduction ledger entry, ensuring the second manager re-evaluates the real balance and rejects the over-allocation."
+
+### Q12: How is project assignment validated for daily attendance, and why reject unassigned submissions?
+**Senior Architect Answer:**
+> "We enforce a strict business invariant: attendance logging requires an active project assignment spanning the attendance date (`IsActive == true && StartDate <= Date && (EndDate == null || EndDate >= Date)`).
+> Rather than silently logging unassigned attendance as `PendingApproval`, which creates ghost records and administrative overhead for project managers, we reject unassigned submissions immediately with a descriptive domain error. This ensures attendance is only ever captured against authorized allocations."
+
+### Q13: How do you allow an employee to re-log attendance if their previous entry for that day was cancelled?
+**Senior Architect Answer:**
+> "If a simple unique index `(EmployeeId, Date)` were used, a cancelled record would permanently block an employee from submitting corrected attendance for that calendar day.
+> We solved this using an EF Core **Filtered Unique Index**:
+> ```csharp
+> builder.HasIndex(a => new { a.EmployeeId, a.Date })
+>        .IsUnique()
+>        .HasFilter("[Status] <> 4"); // 4 = Cancelled
+> ```
+> Cancelled records are excluded from the unique index, allowing employees to re-log attendance for that date while still strictly preventing multiple active attendance records."
+
+### Q14: How does the Repository Pattern improve this architecture without creating generic repository bloat?
+**Senior Architect Answer:**
+> "We avoided generic repositories (`IRepository<T>`) and redundant Unit of Work abstractions that merely mirror EF Core's built-in `DbContext`.
+> Instead, we implemented explicit, domain-focused repositories:
+> - `IAttendanceRepository`
+> - `ILeaveRepository`
+> - `IProjectRepository`
+> - `IEmployeeRepository`
+> 
+> Each repository contains only meaningful EF Core queries, data access logic, and database-specific locking operations (`sp_getapplock`). Services retain 100% of the business logic, validation, and multi-aggregate transaction orchestration, keeping the codebase clean, readable, and natural for junior-to-senior developers alike."

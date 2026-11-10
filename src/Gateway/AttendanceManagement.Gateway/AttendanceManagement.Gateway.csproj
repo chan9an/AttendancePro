@@ -10,6 +10,13 @@
   <ItemGroup>
     <!-- Ocelot API Gateway -->
     <PackageReference Include="Ocelot" Version="23.3.3" />
+
+    <!-- JWT Bearer Authentication at Gateway Ingress -->
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="8.0.4" />
+
+    <!-- Swagger UI for Aggregated Documentation -->
+    <PackageReference Include="Swashbuckle.AspNetCore" Version="6.5.0" />
+
     <!-- Structured Logging with Serilog -->
     <PackageReference Include="Serilog.AspNetCore" Version="8.0.1" />
     <PackageReference Include="Serilog.Sinks.Console" Version="5.0.1" />

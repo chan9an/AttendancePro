@@ -1,3 +1,6 @@
+using System.Text;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
+using Microsoft.IdentityModel.Tokens;
 using Ocelot.DependencyInjection;
 using Ocelot.Middleware;
 using Serilog;
@@ -23,10 +26,39 @@ try
     // 2. Load Ocelot Configuration File
     builder.Configuration.AddJsonFile("Configuration/ocelot.json", optional: false, reloadOnChange: true);
 
-    // 3. Register Ocelot Services
+    // 3. Configure Ingress JWT Bearer Authentication
+    // Validates token signature, issuer, audience, and expiration at Gateway ingress
+    // Raw Authorization: Bearer token is forwarded downstream for independent microservice validation
+    string secretKey = builder.Configuration["JwtSettings:Secret"] 
+        ?? "EnterpriseSecretKeyForDevPurposesAttendanceLeaveManagement2026Min32Bytes!";
+    string issuer = builder.Configuration["JwtSettings:Issuer"] ?? "AttendanceManagement.IdentityService";
+    string audience = builder.Configuration["JwtSettings:Audience"] ?? "AttendanceManagement.Clients";
+
+    builder.Services.AddAuthentication()
+        .AddJwtBearer("GatewayBearer", options =>
+        {
+            options.RequireHttpsMetadata = false; // Dev environment
+            options.SaveToken = true;
+            options.TokenValidationParameters = new TokenValidationParameters
+            {
+                ValidateIssuerSigningKey = true,
+                IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(secretKey)),
+                ValidateIssuer = true,
+                ValidIssuer = issuer,
+                ValidateAudience = true,
+                ValidAudience = audience,
+                ValidateLifetime = true,
+                ClockSkew = TimeSpan.Zero
+            };
+        });
+
+    // 4. Register Ocelot Gateway Services
     builder.Services.AddOcelot(builder.Configuration);
 
-    // 4. Configure CORS for client access
+    // 5. Configure Swagger UI for unified downstream API exploration
+    builder.Services.AddEndpointsApiExplorer();
+
+    // 6. Configure CORS for client access
     builder.Services.AddCors(options =>
     {
         options.AddPolicy("AllowAllClients", policy =>
@@ -41,7 +73,7 @@ try
 
     app.UseCors("AllowAllClients");
 
-    // 5. Correlation ID tracking middleware
+    // 7. Correlation ID tracking middleware & Gateway Health Probe
     app.Use(async (context, next) =>
     {
         const string correlationHeader = "X-Correlation-ID";
@@ -53,10 +85,28 @@ try
         }
 
         context.Response.Headers.TryAdd(correlationHeader, correlationId);
+
+        // Instant health probe for container/orchestrator monitoring
+        if (context.Request.Path == "/health")
+        {
+            context.Response.ContentType = "application/json";
+            await context.Response.WriteAsync("{\"status\":\"Healthy\",\"gateway\":\"AttendanceManagement.Gateway\",\"port\":5000}");
+            return;
+        }
+
         await next();
     });
 
-    // 6. Execute Ocelot Pipeline
+    // 8. Unified Swagger UI at /swagger
+    app.UseSwaggerUI(c =>
+    {
+        c.SwaggerEndpoint("/gateway/swagger/identity/v1/swagger.json", "Identity & Employee API v1 (Gateway)");
+        c.SwaggerEndpoint("/gateway/swagger/attendance/v1/swagger.json", "Attendance & Leave API v1 (Gateway)");
+        c.RoutePrefix = "swagger";
+    });
+
+    // 9. Execute Ingress Authentication & Ocelot Pipeline
+    app.UseAuthentication();
     await app.UseOcelot();
 
     await app.RunAsync();
